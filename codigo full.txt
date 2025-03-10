@@ -1,34 +1,46 @@
-# Networking
+terraform {
+  required_providers {
+    aws = {
+      source = "hashicorp/aws"
+      version = "~>3.0"
+    }
+  }
+}
+provider "aws" {
+  region     = "us-east-1"
+  access_key = "xxxx"
+  secret_key = "xxxx"
+
+}
+
 resource "aws_vpc" "lab_vpc" {
-  cidr_block = "10.1.0.0/26"
+  cidr_block =  "10.1.0.0/26"
   tags = {
     Name = "lab_vpc"
   }
 }
-
 resource "aws_subnet" "subnet_public" {
   vpc_id     = aws_vpc.lab_vpc.id
   cidr_block = "10.1.0.0/28"
+  availability_zone = "us-east-1a"
   tags = {
     Name = "subnet_public"
   }
 }
-
 resource "aws_subnet" "subnet_private" {
   vpc_id     = aws_vpc.lab_vpc.id
   cidr_block = "10.1.0.16/28"
+  availability_zone = "us-east-1a"
   tags = {
     Name = "subnet_private"
   }
 }
-
 resource "aws_internet_gateway" "lab_internet_gw" {
   vpc_id = aws_vpc.lab_vpc.id
   tags = {
     Name = "lab_internet_gw"
   }
 }
-
 resource "aws_route_table" "internet" {
   vpc_id = aws_vpc.lab_vpc.id
 
@@ -36,7 +48,6 @@ resource "aws_route_table" "internet" {
     cidr_block = "0.0.0.0/0"
     gateway_id = aws_internet_gateway.lab_internet_gw.id
   }
-
   tags = {
     Name = "internet"
   }
@@ -47,9 +58,35 @@ resource "aws_route_table_association" "public_routetable" {
   route_table_id = aws_route_table.internet.id
 }
 
-# IAM Role and Instance Profile
+resource "aws_eip" "nat_eip" {
+  
+}
+resource "aws_nat_gateway" "lab_natgw" {
+  allocation_id = aws_eip.nat_eip.id
+  subnet_id     = aws_subnet.subnet_public.id
+  depends_on = [aws_internet_gateway.lab_internet_gw]
+}
+resource "aws_route_table" "nat" {
+  vpc_id = aws_vpc.lab_vpc.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_nat_gateway.lab_natgw.id
+  }
+  tags = {
+    Name = "nat"
+  }
+}
+resource "aws_route_table_association" "private_routetable" {
+  subnet_id      = aws_subnet.subnet_private.id
+  route_table_id = aws_route_table.nat.id
+}
+
 resource "aws_iam_role" "ec2-ssm" {
   name = "ec2-ssm"
+
+  # Terraform's "jsonencode" function converts a
+  # Terraform expression result to valid JSON syntax.
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -64,45 +101,40 @@ resource "aws_iam_role" "ec2-ssm" {
     ]
   })
 }
-
 resource "aws_iam_role_policy_attachment" "ec2-ssm-policy" {
   role       = aws_iam_role.ec2-ssm.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
-
 resource "aws_iam_instance_profile" "ec2-profile_private" {
   name = "ec2_ssm_private"
   role = aws_iam_role.ec2-ssm.name
 }
 
-# EC2 Instances
-resource "aws_instance" "ec2_private" {
-  count = 2
+resource "aws_instance" "ec2_private" { #creacion instancia test con linux 2
+  count = 2 #create two similar Ec2
   ami           = "ami-0984f4b9e98be44bf"
   instance_type = "t2.micro"
-  subnet_id     = aws_subnet.subnet_private.id
+  subnet_id = aws_subnet.subnet_private.id
   vpc_security_group_ids = [aws_security_group.LB_EC2.id]
   iam_instance_profile = aws_iam_instance_profile.ec2-profile_private.name
   user_data = file("${path.module}/app_install.sh")
   tags = {
     Name = "ec2_private"
   }
+
 }
 
-# Load Balancer
 resource "aws_elb" "loadbalancer" {
-  name            = "loadbalancer"
-  subnets         = [aws_subnet.subnet_public.id]
+  name               = "loadbalancer"
+  subnets = [aws_subnet.subnet_public.id] #a la subnet a la que se aloja o sea la publica
   security_groups = [aws_security_group.LB_SG.id]
-  internal        = false
-
+  internal =  false 
   listener {
     instance_port     = 80
     instance_protocol = "http"
     lb_port           = 80
     lb_protocol       = "http"
   }
-
   health_check {
     healthy_threshold   = 2
     unhealthy_threshold = 2
@@ -111,46 +143,44 @@ resource "aws_elb" "loadbalancer" {
     interval            = 30
   }
 
-  instances = [for instance in aws_instance.ec2_private : instance.id]
+instances= [for instance in aws_instance.ec2_private : instance.id]
+
 }
 
-# Security Groups
 resource "aws_security_group" "LB_SG" {
   name        = "LB_SG"
-  description = "Allow inbound traffic and all outbound traffic"
+  description = "Allow  inbound traffic and all outbound traffic"
   vpc_id      = aws_vpc.lab_vpc.id
-
   egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+    from_port        = 0
+    to_port          = 0
+    protocol         = "-1"
+    cidr_blocks      = ["0.0.0.0/0"]
   }
 
-  ingress {
-    protocol    = "tcp"
-    from_port   = 80
-    to_port     = 80
-    cidr_blocks = ["0.0.0.0/0"]
+  ingress{
+    protocol = "tcp"
+    from_port =80
+    to_port =80
+    cidr_blocks = ["0.0.0.0/0"] 
   }
 }
 
 resource "aws_security_group" "LB_EC2" {
   name        = "LB_EC2"
-  description = "Allow inbound traffic from the Load Balancer"
+  description = "Allow  inbound traffic and all outbound traffic"
   vpc_id      = aws_vpc.lab_vpc.id
-
   egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
+      from_port        = 0
+      to_port          = 0
+      protocol         = "-1"
+      cidr_blocks      = ["0.0.0.0/0"]
+    }
+  ingress{
+    protocol = "tcp"
+    from_port =80
+    to_port =80
     cidr_blocks = ["0.0.0.0/0"]
   }
-
-  ingress {
-    protocol    = "tcp"
-    from_port   = 80
-    to_port     = 80
-    source_security_group_id = aws_security_group.LB_SG.id
-  }
 }
+
